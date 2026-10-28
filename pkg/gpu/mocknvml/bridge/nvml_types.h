@@ -156,7 +156,7 @@ typedef struct nvmlMemory_v2_st
 } nvmlMemory_v2_t;
 
 /* NVML CUDA 13.4 input used by the container toolkit's memory-limit hook. */
-typedef struct
+typedef struct nvmlSetMemoryLimits_v1_st
 {
     const char *nameSpace;
     unsigned long long softLimit;
