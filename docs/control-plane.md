@@ -348,6 +348,34 @@ handlers to replay the current caches and its workers to start. Upgrades use a
 `RollingUpdate` Deployment strategy with `maxUnavailable: 0` and `maxSurge: 1`
 to preserve serving overlap while leader election maintains single-writer mutation.
 
+## Compiled rack state
+
+The control plane can compare a rack's current inputs with its saved delivery
+record. It compares the rack spec generation, the inventory and profile versions,
+and the UIDs and generations of the accepted policies that select this rack.
+For a declared rack group, the policy evaluation must use the same profile UID
+and generation as the delivery record. If they differ, the caller must retry.
+Deleting an accepted policy changes the input list even when another policy
+supplies the same setting. Status updates alone leave the list unchanged.
+
+The rack-state compiler builds one hardware description for the rack. It reads the
+profile version pinned in `SGPURack.status.delivery` and checks its UID, generation,
+and content revision. A missing delivery record or a mismatch prevents compilation.
+
+The result contains the driver and CUDA versions, the GPU model, and the NVLink
+fabric when the profile declares one. An active slot lists the node, its assignment
+revision, and each GPU’s identity, PCI and NUMA locations, and runtime settings.
+Each GPU inherits the profile defaults. Accepted policies override the fields they
+set, from inventory scope down to GPU scope.
+
+During release, the slot lists the node and assignment revision with
+`releasing: true` and omits the GPU list. A cleanup applies only to the assignment
+revision it captured. If the same node later returns to that slot, the new binding
+keeps its GPUs.
+
+A per-node reader can select one slot from the same result. The compiler runs in
+memory. The delivery writer and the HTTP endpoints are separate work.
+
 ## Stage 1 exclusions
 
 Stage 1 has no agent or driver, workload GPU injection, REST API, Redis,

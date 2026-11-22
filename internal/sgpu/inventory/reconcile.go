@@ -437,11 +437,14 @@ func (r *Reconciler) reconcile(ctx context.Context, key string, requestedGroup *
 			result.Work.BindingsApplied += applyBindings(&targetSpec, partition.retained)
 			result.Work.BindingsApplied += applyBindings(&targetSpec, partition.assigned)
 			if existing != nil {
-				cleanup := r.preservePendingReleases(
+				cleanup, err := r.preservePendingReleases(
 					existing,
 					&targetSpec,
 					allocations.releases,
 				)
+				if err != nil {
+					return err
+				}
 				result.CleanupNeeded = append(result.CleanupNeeded, cleanup...)
 			}
 			if err := rackrender.ValidateRackSpec(targetSpec); err != nil {
@@ -643,7 +646,7 @@ func (r *Reconciler) preservePendingReleases(
 	existing *mokkav1alpha1.SGPURack,
 	target *mokkav1alpha1.SGPURackSpec,
 	releases map[allocate.Coordinate]allocate.Release,
-) []sgpurelease.Cleanup {
+) ([]sgpurelease.Cleanup, error) {
 	cleanup := make([]sgpurelease.Cleanup, 0)
 	targetSlots := make(map[int32]*mokkav1alpha1.SGPURackNode, len(target.Nodes))
 	for i := range target.Nodes {
@@ -657,7 +660,10 @@ func (r *Reconciler) preservePendingReleases(
 		if !found {
 			continue
 		}
-		needed := sgpurelease.Cleanup{RackName: existing.Name, RackUID: existing.UID, Binding: release.Binding, Reason: sgpurelease.ReasonFor(release.Reason)}
+		if !slot.BoundTo(release.Binding.Node.Name, release.Binding.Node.UID) {
+			return nil, ErrAllocationInputChanged
+		}
+		needed := sgpurelease.ForSlot(existing, slot, sgpurelease.ReasonFor(release.Reason))
 		if r.cleanup != nil && r.cleanup.Ready(needed) {
 			continue
 		}
@@ -669,7 +675,7 @@ func (r *Reconciler) preservePendingReleases(
 		target.Nodes = append(target.Nodes, *slot.DeepCopy())
 	}
 	slices.SortFunc(target.Nodes, func(a, b mokkav1alpha1.SGPURackNode) int { return cmp.Compare(a.Index, b.Index) })
-	return cleanup
+	return cleanup, nil
 }
 
 //nolint:cyclop // Retirement gates deletion on every exact slot cleanup acknowledgement.
@@ -685,14 +691,7 @@ func (r *Reconciler) retireRack(
 		if slot.NodeRef == nil {
 			continue
 		}
-		binding := allocate.Binding{
-			Coordinate: allocate.Coordinate{
-				Group:     allocate.RackGroupKey{InventoryName: inventory.Name, InventoryUID: inventory.UID, RackGroup: rack.Spec.Identity.RackGroup},
-				RackIndex: rack.Spec.Identity.RackIndex, NodeIndex: slot.Index,
-			},
-			Node: allocate.NodeReference{Name: slot.NodeRef.Name, UID: slot.NodeRef.UID},
-		}
-		needed := sgpurelease.Cleanup{RackName: rack.Name, RackUID: rack.UID, Binding: binding, Reason: reason}
+		needed := sgpurelease.ForSlot(rack, slot, reason)
 		if r.cleanup != nil && r.cleanup.Ready(needed) {
 			clearSlots[slot.Index] = slot.NodeRef.UID
 			continue
@@ -916,6 +915,7 @@ func (r *Reconciler) createOrUpdateRack(
 	changed, _, updated, err := r.mutateRack(ctx, inventory, existing, func(latest *mokkav1alpha1.SGPURack) bool {
 		before := latest.DeepCopy()
 		latest.Spec = *spec.DeepCopy()
+		preserveAssignmentRevisions(before.Spec.Nodes, latest.Spec.Nodes)
 		ensureRackMetadata(latest, inventory, r.kwokShardName)
 		return !rackSemanticEqual(before, latest)
 	})
@@ -1469,6 +1469,26 @@ func compareAllocationRackKey(a, b allocationRackKey) int {
 		return order
 	}
 	return cmp.Compare(a.rackIndex, b.rackIndex)
+}
+
+// Rendering starts with fresh bindings. Carry a revision forward only while
+// the same Node instance still occupies the same slot.
+func preserveAssignmentRevisions(previous, desired []mokkav1alpha1.SGPURackNode) {
+	var revisions map[int32]*mokkav1alpha1.SGPUNodeReference
+	for _, slot := range previous {
+		if slot.NodeRef != nil && slot.NodeRef.AssignmentRevision > 0 {
+			if revisions == nil {
+				revisions = make(map[int32]*mokkav1alpha1.SGPUNodeReference)
+			}
+			revisions[slot.Index] = slot.NodeRef
+		}
+	}
+	for i := range desired {
+		old := revisions[desired[i].Index]
+		if old != nil && desired[i].BoundTo(old.Name, old.UID) {
+			desired[i].NodeRef.AssignmentRevision = old.AssignmentRevision
+		}
+	}
 }
 
 func applyBindings(spec *mokkav1alpha1.SGPURackSpec, bindings []allocate.Binding) int64 {

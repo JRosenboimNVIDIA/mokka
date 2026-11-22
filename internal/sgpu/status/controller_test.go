@@ -280,6 +280,7 @@ func TestComputeInventoryProgrammedRejectsUnhashableProfile(t *testing.T) {
 func TestComputeRackStatusCountsExactProjectionAndDuplicateBindings(t *testing.T) {
 	input := aggregateInput(t)
 	rack := input.Racks[0]
+	rack.Status.Delivery = &mokkav1alpha1.RackDelivery{Generation: 12}
 	oldTime := metav1.NewTime(time.Unix(50, 0))
 	rack.Status.Conditions = []metav1.Condition{{
 		Type: mokkav1alpha1.RackConditionReady, Status: metav1.ConditionFalse,
@@ -288,6 +289,7 @@ func TestComputeRackStatusCountsExactProjectionAndDuplicateBindings(t *testing.T
 
 	got := ComputeRack(RackInput{Rack: rack, Racks: input.Racks, Nodes: input.Nodes, Projection: input.Projection}, metav1.NewTime(time.Unix(100, 0)))
 	require.Equal(t, int32(3), got.AssignedNodes)
+	require.Equal(t, rack.Status.Delivery, got.Delivery)
 	require.Equal(t, metav1.ConditionFalse, condition(got.Conditions, mokkav1alpha1.RackConditionReady).Status)
 	require.Equal(t, ReasonDuplicateBindings, condition(got.Conditions, mokkav1alpha1.RackConditionReady).Reason)
 	require.Equal(t, oldTime, condition(got.Conditions, mokkav1alpha1.RackConditionReady).LastTransitionTime)
@@ -328,6 +330,18 @@ func TestComputeRackDerivesProjectionFromExactCachedNodeMetadata(t *testing.T) {
 			name: "successful process outcome cannot hide missing label",
 			mutate: func(input *RackInput) {
 				delete(input.Nodes[0].Labels, sgpumetadata.AssignedLabel)
+			},
+			wantStatus: metav1.ConditionFalse,
+			wantReason: ReasonProjectionIncomplete,
+		},
+		{
+			name: "previous binding conflict cannot mark a new assignment as conflicting",
+			mutate: func(input *RackInput) {
+				delete(input.Nodes[0].Annotations, sgpumetadata.AssignmentAnnotation)
+				input.Rack.Spec.Nodes[0].NodeRef.AssignmentRevision = 9
+				input.Projection[0].AssignmentRevision = 7
+				input.Projection[0].State = sgpuprojection.StateConflict
+				input.Projection[0].Reason = sgpuprojection.ReasonNodeMetadataConflict
 			},
 			wantStatus: metav1.ConditionFalse,
 			wantReason: ReasonProjectionIncomplete,
