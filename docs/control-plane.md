@@ -374,7 +374,24 @@ revision it captured. If the same node later returns to that slot, the new bindi
 keeps its GPUs.
 
 A per-node reader can select one slot from the same result. The compiler runs in
-memory. The delivery writer and the HTTP endpoints are separate work.
+memory.
+
+The elected leader saves the input versions in `SGPURack.status.delivery`.
+The first delivery has generation 1. Each changed rack gets a new generation
+when its binding, profile, inventory version, or accepted policies change. The
+leader writes the generation and inputs together with the rack status. A new
+leader continues from the saved generation. The writer waits for admission of
+the exact inventory UID and generation. A rejected edit leaves the previous
+delivery in place. Readers can observe a new delivery after a watch reconnects
+and skips intermediate edits, even when the final spec has the same values.
+The writer retries if it sees an older generation of an input already in the
+saved delivery.
+
+The v2 node assignment format identifies the node UID, assignment revision,
+rack and slot, and the minimum rack delivery generation for that binding.
+A release record contains the node UID, its revision, and `assigned: false`.
+The current projection writer still uses v1. Publication of v2 annotations
+and the rack-state HTTP endpoint are separate steps.
 
 ## Stage 1 exclusions
 

@@ -387,6 +387,7 @@ func reconcileRackStatus(
 	snapshot *informerCache,
 	reconciler *sgpustatus.Reconciler,
 	projection projectionSnapshots,
+	deliveries *deliveryCatalog,
 	key statusKey,
 ) error {
 	rack, err := snapshot.Rack(key.name)
@@ -397,6 +398,10 @@ func reconcileRackStatus(
 		return err
 	}
 	input, _, err := rackStatusInput(snapshot, projection, rack)
+	if err != nil {
+		return err
+	}
+	input.Delivery, err = deliveries.get(rack.Spec.InventoryRef.Name).manifest(rack)
 	if err != nil {
 		return err
 	}

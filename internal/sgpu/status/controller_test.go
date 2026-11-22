@@ -1022,3 +1022,69 @@ func (f *fakeRackWriter) UpdateStatus(_ context.Context, candidate *mokkav1alpha
 	f.object = candidate.DeepCopy()
 	return f.object.DeepCopy(), nil
 }
+
+func TestDeliveryResumesFromPersistedStatus(t *testing.T) {
+	t.Parallel()
+	in := singleProjectedRackInput(t)
+	in.Rack.Generation = 12
+	in.Rack.Status.Delivery = &mokkav1alpha1.RackDelivery{Generation: 41, RackSpecGeneration: 11}
+	in.Delivery = &mokkav1alpha1.RackDelivery{RackSpecGeneration: 12}
+	writer := &fakeRackWriter{object: in.Rack.DeepCopy(), conflictOnce: true, conflictConverges: true}
+	changed, err := NewReconciler(nil, writer, nil).ReconcileRack(t.Context(), in)
+	require.NoError(t, err)
+	require.False(t, changed)
+	require.Equal(t, int64(42), writer.object.Status.Delivery.Generation)
+	require.Equal(t, 2, writer.gets)
+	// A new leader takes its counter from the rack, even with no in-memory history.
+	in.Rack = writer.object.DeepCopy()
+	in.Rack.Generation++
+	in.Delivery.RackSpecGeneration = in.Rack.Generation
+	writer.object = in.Rack.DeepCopy()
+	changed, err = NewReconciler(nil, writer, nil).ReconcileRack(t.Context(), in)
+	require.NoError(t, err)
+	require.True(t, changed)
+	require.Equal(t, int64(43), writer.object.Status.Delivery.Generation)
+	// An older snapshot of this same rack spec cannot replace the delivery
+	// that a different leader has already published.
+	writer.object.Status.Delivery.Generation++
+	writer.object.Status.Delivery.AcceptedPolicies = []mokkav1alpha1.DeliveryObjectReference{{UID: "new-policy", Generation: 1}}
+	writes := writer.updates
+	changed, err = NewReconciler(nil, writer, nil).ReconcileRack(t.Context(), in)
+	require.Error(t, err)
+	require.False(t, changed)
+	require.Equal(t, writes, writer.updates)
+
+}
+
+func TestDeliveryRejectsOlderInputVersions(t *testing.T) {
+	t.Parallel()
+	for name, ref := range map[string]func(*mokkav1alpha1.RackDelivery) *mokkav1alpha1.DeliveryObjectReference{
+		"inventory": func(d *mokkav1alpha1.RackDelivery) *mokkav1alpha1.DeliveryObjectReference { return &d.InventoryRef },
+		"profile": func(d *mokkav1alpha1.RackDelivery) *mokkav1alpha1.DeliveryObjectReference {
+			return &d.ProfileRef.DeliveryObjectReference
+		},
+		"policy": func(d *mokkav1alpha1.RackDelivery) *mokkav1alpha1.DeliveryObjectReference {
+			return &d.AcceptedPolicies[0]
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			in := singleProjectedRackInput(t)
+			saved := &mokkav1alpha1.RackDelivery{Generation: 12, RackSpecGeneration: in.Rack.Generation, AcceptedPolicies: []mokkav1alpha1.DeliveryObjectReference{{UID: "policy", Generation: 2}}}
+			*ref(saved) = mokkav1alpha1.DeliveryObjectReference{UID: types.UID(name), Generation: 2}
+			in.Rack.Status.Delivery = saved
+			in.Delivery = saved.DeepCopy()
+			ref(in.Delivery).Generation = 1
+			writer := &fakeRackWriter{object: in.Rack.DeepCopy()}
+			leader := NewReconciler(nil, writer, nil)
+			changed, err := leader.ReconcileRack(t.Context(), in)
+			require.Error(t, err)
+			require.False(t, changed)
+			require.Zero(t, writer.updates)
+			ref(in.Delivery).Generation = 3
+			changed, err = leader.ReconcileRack(t.Context(), in)
+			require.NoError(t, err)
+			require.True(t, changed)
+			require.Equal(t, int64(13), writer.object.Status.Delivery.Generation)
+		})
+	}
+}

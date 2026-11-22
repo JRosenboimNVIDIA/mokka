@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"slices"
 
+	"k8s.io/apimachinery/pkg/types"
+
 	api "github.com/NVIDIA/k8s-test-infra/api/v1alpha1"
 	"github.com/NVIDIA/k8s-test-infra/internal/sgpu/policy"
 	"github.com/NVIDIA/k8s-test-infra/internal/sgpu/rackrender"
@@ -49,7 +51,7 @@ func DependencyManifest(rack *api.SGPURack, profile *api.SGPURackProfile, evalua
 		return next, true, nil
 	}
 	next.Generation = saved.Generation
-	return next, inputsChanged(saved, &next), nil
+	return next, InputsChanged(saved, &next), nil
 }
 
 func evaluatedInventory(owner api.SGPURackInventoryReference, evaluated *policy.Evaluation) (api.DeliveryObjectReference, error) {
@@ -78,7 +80,11 @@ func comparePolicyUID(a, b api.DeliveryObjectReference) int {
 	return cmp.Compare(a.UID, b.UID)
 }
 
-func inputsChanged(saved, next *api.RackDelivery) bool {
+// InputsChanged compares input versions independently of the delivery counter.
+func InputsChanged(saved, next *api.RackDelivery) bool {
+	if saved == nil {
+		return true
+	}
 	previous := saved.AcceptedPolicies
 	// Kubernetes list-map order carries no meaning. Keep informer objects immutable.
 	if !slices.IsSortedFunc(previous, comparePolicyUID) {
@@ -86,4 +92,31 @@ func inputsChanged(saved, next *api.RackDelivery) bool {
 	}
 	return saved.RackSpecGeneration != next.RackSpecGeneration || saved.InventoryRef != next.InventoryRef ||
 		saved.ProfileRef != next.ProfileRef || !slices.Equal(previous, next.AcceptedPolicies)
+}
+
+// InputsRegressed reports whether an observation would replace an input with
+// an older generation of the same Kubernetes object. A policy can be removed
+// and a recreated object starts a new sequence under its new UID.
+func InputsRegressed(saved, observed *api.RackDelivery) bool {
+	if saved == nil || observed == nil {
+		return false
+	}
+	if olderReference(saved.InventoryRef, observed.InventoryRef) ||
+		olderReference(saved.ProfileRef.DeliveryObjectReference, observed.ProfileRef.DeliveryObjectReference) {
+		return true
+	}
+	generations := make(map[types.UID]int64, len(saved.AcceptedPolicies))
+	for _, p := range saved.AcceptedPolicies {
+		generations[p.UID] = p.Generation
+	}
+	for _, p := range observed.AcceptedPolicies {
+		if p.Generation < generations[p.UID] {
+			return true
+		}
+	}
+	return false
+}
+
+func olderReference(saved, observed api.DeliveryObjectReference) bool {
+	return saved.UID == observed.UID && observed.Generation < saved.Generation
 }

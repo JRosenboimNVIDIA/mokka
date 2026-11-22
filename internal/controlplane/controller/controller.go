@@ -302,6 +302,7 @@ func newForNodes(nodes corev1client.NodeInterface, mokkaClient versioned.Interfa
 		profiles:    profiles.Lister(),
 		policies:    runtimePolicyInformer.GetIndexer(),
 	}
+	deliveries := &deliveryCatalog{inventories: make(map[string]*deliveryInputs)}
 	runtimePolicyStatus := sgpustatus.NewRuntimePolicyReconciler(mokkaClient.MokkaV1alpha1().SGPURuntimePolicies(), nil)
 
 	controller := &Controller{
@@ -335,10 +336,16 @@ func newForNodes(nodes corev1client.NodeInterface, mokkaClient versioned.Interfa
 		inventory, getErr := snapshot.Inventory(name)
 		if getErr == nil {
 			updateRackConflictWaiters(rackWaiters, inventory, observed, group, result)
+			previousAdmission := results.get(inventory.Name, inventory.UID).AdmittedInventory
 			if group == nil {
 				results.put(inventory.Name, inventory.UID, result)
 			} else {
 				results.putGroup(inventory.Name, inventory.UID, group.RackGroup, result)
+			}
+			if previousAdmission != result.AdmittedInventory {
+				// Admission and policy evaluation run on separate queues. Wake the
+				// delivery work even when its input versions have not changed again.
+				controller.queues.addStatus(statusKey{kind: statusRuntimePolicies, name: inventory.Name})
 			}
 			controller.queues.addStatus(statusKey{kind: statusInventory, name: inventory.Name, uid: inventory.UID})
 		} else if !apierrors.IsNotFound(getErr) {
@@ -499,9 +506,22 @@ func newForNodes(nodes corev1client.NodeInterface, mokkaClient versioned.Interfa
 		case statusInventory:
 			return reconcileInventoryStatus(ctx, snapshot, statusReconciler, projection, results, key)
 		case statusRack:
-			return reconcileRackStatus(ctx, snapshot, statusReconciler, projection, key)
+			return reconcileRackStatus(ctx, snapshot, statusReconciler, projection, deliveries, key)
 		case statusRuntimePolicies:
-			return reconcileRuntimePolicyStatus(ctx, runtimePolicies, runtimePolicyStatus, key.name)
+			inputs, err := runtimePolicies.evaluate(key.name)
+			if err != nil {
+				return err
+			}
+			admission := results.get(key.name, inputs.InventoryUID).AdmittedInventory
+			inputs.admitted = admission.UID != "" && admission.UID == inputs.InventoryUID && admission.Generation == inputs.InventoryGeneration
+			racks, err := deliveries.update(inputs, snapshot)
+			if err != nil {
+				return err
+			}
+			for _, rack := range racks {
+				controller.queues.addStatus(statusKey{kind: statusRack, name: rack.Name, uid: rack.UID})
+			}
+			return reconcileRuntimePolicyStatus(ctx, inputs.Evaluation, runtimePolicyStatus)
 		default:
 			return fmt.Errorf("unknown status work kind %d", key.kind)
 		}
