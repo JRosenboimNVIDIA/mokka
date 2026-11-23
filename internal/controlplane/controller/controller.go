@@ -10,6 +10,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	sgpuassignment "github.com/NVIDIA/k8s-test-infra/internal/sgpu/assignment"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -57,7 +58,7 @@ type Options struct {
 	StatusDebounce time.Duration
 	// StatusProgressInterval bounds status staleness while changes continue.
 	StatusProgressInterval time.Duration
-	// LiveNodeGetTimeout bounds the exact GET used when a Node leaves the filtered cache.
+	// LiveNodeGetTimeout bounds live Node lookups and rack checks during assignment cleanup.
 	LiveNodeGetTimeout time.Duration
 }
 
@@ -280,7 +281,7 @@ func newForNodes(nodes corev1client.NodeInterface, mokkaClient versioned.Interfa
 	nodeCatalog := nodecatalog.New()
 
 	snapshot := newInformerCache(
-		inventories.Lister(), profiles.Lister(), rackInformer.GetIndexer(), nodeCatalog, nodes,
+		inventories.Lister(), profiles.Lister(), rackInformer.GetIndexer(), nodeCatalog, nodes, mokkaClient.MokkaV1alpha1().SGPURacks(),
 		options,
 	)
 	projection := sgpuprojection.NewController(snapshot, nodes)
@@ -432,6 +433,14 @@ func newForNodes(nodes corev1client.NodeInterface, mokkaClient versioned.Interfa
 			} else {
 				_, err = projection.Project(ctx, key.rackName, key.nodeIndex)
 			}
+			if errors.Is(err, sgpuprojection.ErrRevisionPending) {
+				controller.queues.inventories.Add(rack.Spec.InventoryRef.Name)
+				return nil
+			}
+			if errors.Is(err, sgpuassignment.ErrDeliveryPending) {
+				controller.queues.addStatus(statusKey{kind: statusRack, name: rack.Name, uid: rack.UID})
+				return nil
+			}
 			controller.queues.addStatus(statusKey{kind: statusRack, name: rack.Name, uid: rack.UID})
 			controller.queues.addStatus(statusKey{kind: statusInventory, name: rack.Spec.InventoryRef.Name, uid: rack.Spec.InventoryRef.UID})
 		case projectionCleanup:
@@ -480,6 +489,10 @@ func newForNodes(nodes corev1client.NodeInterface, mokkaClient versioned.Interfa
 				}
 				return retryErr
 			})
+			if errors.Is(err, sgpuprojection.ErrRevisionPending) {
+				controller.queues.inventories.Add(key.cleanup.Binding.Coordinate.Group.InventoryName)
+				return nil
+			}
 			if err == nil && outcome.State == sgpuprojection.StateCleaned {
 				// Retiring or shrinking racks resumes in the inventory reconcile; a
 				// released binding only needs its group reallocated.

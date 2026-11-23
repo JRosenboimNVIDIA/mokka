@@ -19,6 +19,7 @@ import (
 
 	mokkav1alpha1 "github.com/NVIDIA/k8s-test-infra/api/v1alpha1"
 	"github.com/NVIDIA/k8s-test-infra/internal/sgpu/allocate"
+	sgpuassignment "github.com/NVIDIA/k8s-test-infra/internal/sgpu/assignment"
 	sgpuinventory "github.com/NVIDIA/k8s-test-infra/internal/sgpu/inventory"
 	sgpumetadata "github.com/NVIDIA/k8s-test-infra/internal/sgpu/metadata"
 	"github.com/NVIDIA/k8s-test-infra/internal/sgpu/nodecatalog"
@@ -608,6 +609,9 @@ func (r *eventRouter) rackUpdate(oldObject, newObject any) {
 		r.observeRackStatus(newRack)
 	}
 	if rackUnchanged(oldRack, newRack) {
+		if sgpuassignment.DeliveryCoversSpec(newRack) && !sgpuassignment.DeliveryCoversSpec(oldRack) {
+			r.routeRackCurrent(newRack, false, nil)
+		}
 		return
 	}
 	if rackCapacityUnchanged(oldRack, newRack) {
